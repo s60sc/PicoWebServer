@@ -6,4 +6,4 @@ target_link_libraries(PicoWebServer pico_stdlib hardware_rtc hardware_pio pico_m
 pico_enable_stdio_usb(PicoWebServer 1)
 pico_enable_stdio_uart(PicoWebServer 0)
 pico_add_extra_outputs(PicoWebServer)
-pico_set_program_url(PicoWebServer "https://github.com/raspberrypi/pico-examples/tree/HEAD")
+pico_set_program_url(PicoWebServer "https://github.com/s60sc/PicoWebServer")
