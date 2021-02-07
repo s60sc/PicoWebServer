@@ -1,0 +1,59 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; SET pin 0 should be mapped to your LED GPIO
+
+.program blink
+    pull block
+    out y, 32
+.wrap_target
+    mov x, y
+    set pins, 1   ; Turn LED on
+lp1:
+    jmp x-- lp1   ; Delay for (x + 1) cycles, x is a 32 bit number
+    mov x, y
+    set pins, 0   ; Turn LED off
+lp2:
+    jmp x-- lp2   ; Delay for the same number of cycles again
+.wrap             ; Blink forever!
+
+
+% c-sdk {
+// this is a raw helper function for use by the user which sets up the GPIO output, and configures the SM to output on a particular pin
+
+void blink_program_init(PIO pio, uint sm, uint offset, uint pin) {
+   pio_gpio_init(pio, pin);
+   pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+   pio_sm_config c = blink_program_get_default_config(offset);
+   sm_config_set_set_pins(&c, pin, 1);
+   pio_sm_init(pio, sm, offset, &c);
+}
+
+// added by s60sc 2021
+void blinkLed (float durationSecs) {
+    // use PIO to blink on board LED at required duration in seconds
+    static uint sm = 99; // invalid
+    static PIO pio = pio0; // pio to use
+    static uint offset; // program start slot in instruction memory
+    // convert blink time in (max approx 32) secs to 133 MHz clock cycles
+    uint32_t delayCycles = (uint32_t)(durationSecs * 133000000);  
+
+    if (sm == 99) {
+        // SM not yet defined
+        offset = pio_add_program(pio, &blink_program); // add program into instruction memory 
+        sm = pio_claim_unused_sm(pio, true);  // get a free state machine in pio
+        blink_program_init(pio, sm, offset, 25); // call helper function, 4th arg is LED pin
+        pio_sm_put(pio, sm, delayCycles); // load tx fifo with delay 
+        pio_sm_set_enabled(pio, sm, true);  // set SM running
+    } else {
+        // change blink duration to new setting
+        pio_sm_put(pio, sm, delayCycles); // load tx fifo with new delay 
+        pio_sm_restart(pio, sm); // return to known state
+        pio_sm_exec(pio, sm, pio_encode_jmp(offset)); // force restart from first instruction
+    }
+}
+
+%}
