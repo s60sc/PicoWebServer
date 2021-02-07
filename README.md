@@ -26,8 +26,8 @@ GND  | GND |
 
 The ESP8266 can be powered from the Pico, or a separate power source can be used but retaining the common GND connection. The connection image shows a Wemos D1, but ESP-01S are inexpensive.  
 
-<img src="images/connection.jpg" alt="connection" width=50%/>
-<img src="images/esp01s.jpg" alt="esp01s" width=30%/>
+<img src="images/connection.jpg" alt="connection" width=40%/>
+<img src="images/esp01s.jpg" alt="esp01s" width=25%/>
 
 ## Configuration
 
