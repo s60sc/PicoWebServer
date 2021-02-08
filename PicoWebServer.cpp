@@ -216,29 +216,29 @@ void serveClients() {
   while (true) {
     // handle incoming web client requests, gate on interrupt
     mutex_enter_blocking(&uartIrq);
-    if (uart_is_readable(uart0)) {
-      processATcommand("", 2, "");
-      // request available
-      if (strstr(responseBuffer, "+IPD") != NULL) {
+      if (uart_is_readable(uart0)) {
+        processATcommand("", 2, "");
+        // request available
+        if (strstr(responseBuffer, "+IPD") != NULL) {
 
-        // +IPD,<link	ID>,<len>:<method> <path> HTTP/1.1
-        // received client request, get client id
-        int valOffset = 0;
-        int valLen = getParam(valOffset, "+IPD,", ","); 
-        char id[valLen+1] = {0};
-        strncpy(id, responseBuffer+valOffset, valLen);
+          // +IPD,<link	ID>,<len>:<method> <path> HTTP/1.1
+          // received client request, get client id
+          int valOffset = 0;
+          int valLen = getParam(valOffset, "+IPD,", ","); 
+          char id[valLen+1] = {0};
+          strncpy(id, responseBuffer+valOffset, valLen);
 
-        // get length of data to return
-        valOffset += valLen;
-        valLen = getParam(valOffset, ",", ":"); 
-        char reqLen[valLen+1] = {0};
-        strncpy(reqLen, responseBuffer+valOffset, valLen);
-        int requestLen = atoi(reqLen);
+          // get length of data to return
+          valOffset += valLen;
+          valLen = getParam(valOffset, ",", ":"); 
+          char reqLen[valLen+1] = {0};
+          strncpy(reqLen, responseBuffer+valOffset, valLen);
+          int requestLen = atoi(reqLen);
 
-        // received payload, so process response   
-        if (strlen(responseBuffer) > requestLen) sendResponse(id);       
-        else printf("*** truncated input, expected %u, got %u: %s\n", requestLen, strlen(responseBuffer), responseBuffer);
-      }  // unexpected content, ignore
+          // received payload, so process response   
+          if (strlen(responseBuffer) > requestLen) sendResponse(id);       
+          else printf("*** truncated input, expected %u, got %u: %s\n", requestLen, strlen(responseBuffer), responseBuffer);
+        }  // unexpected content, ignore
     }
     mutex_exit(&ESP8266mutex); // allow gpios
     irq_set_enabled(UART0_IRQ, true); // reenable interrupts
@@ -303,10 +303,10 @@ static void sendResponse(const char* id) {
     sendResponsePart(id, httpFooter);
 
   } else {
-    // took to long, abandon response
+    // took too long, something wrong, so restart
     puts("*** failed to obtain response for client");
-    sendResponsePart(id, serverError);
-    mutex_exit(&core0resp);
+    sleep_ms(10000);
+    watchdog_reboot(0, 0, 0); 
   }
   snprintf(sendBuffer, SENDBUFFERLEN, "CIPCLOSE=%s", id);
   processATcommandOK(sendBuffer, 2); // close request
