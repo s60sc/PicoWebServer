@@ -34,6 +34,7 @@ static const char httpHeader[] = "HTTP/1.0 200 OK\r\nAccess-Control-Allow-Origin
 static const char contentHeader[] = "Content-type: text/html\r\n\r\n";
 static const char jsonHeader[] = "Content-type: application/json\r\n\r\n";
 static const char httpFooter[] = "\r\n";
+static const char serverError[] = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
 
 // used for IRQs
 static uintptr_t* webIn = 0;
@@ -51,9 +52,11 @@ static bool processATcommandOK(const char* command, int64_t allowTime);
 static int getParam(int &valOffset, const char* startStr, const char* endStr);
 static int getATdata(int buffPtr);
 static void sendResponse(const char* id);
+static bool sendResponsePart(const char* id, const char* responseData);
 static void setTOD();
 static void core0_sio_irq() ;
 static void uartRXirq();
+static void ESP8266reset();
 
 /* ----------------------------- uart and cores setup -------------------------------- */
 
@@ -64,6 +67,11 @@ void setupUART() {
   // Set the GPIO pin mux to the UART - 0 is TX, 1 is RX
   gpio_set_function(0, GPIO_FUNC_UART);
   gpio_set_function(1, GPIO_FUNC_UART);
+
+  // ESP8266 reset pin
+  gpio_init(RESETPIN);
+  gpio_set_dir(RESETPIN, GPIO_OUT);
+  ESP8266reset();
 
   // use mutexes to control access
   mutex_init(&ESP8266mutex);
@@ -80,23 +88,27 @@ void setupUART() {
   rtc_init(); 
 }
 
+static void ESP8266reset() {
+  gpio_put(RESETPIN, 0);
+  sleep_ms(10);
+  gpio_put(RESETPIN, 1);
+}
+
 void setupESP8266() {
-  // reset ESP8266
+  // initialise ESP8266
+  processATcommand("", 5, ""); // flush ESP8266 boot messages
   if (processATcommandOK("GMR", 2)) {
-    processATcommandOK("RST", 2); 
-    processATcommand("", 5, ""); // flush ESP8266 boot messages
+   // not required due to reset pin
+   // processATcommandOK("RST", 2); 
+   // processATcommand("", 5, ""); // flush ESP8266 boot messages
     uart_puts(uart0, "ATE0\r\n"); // stop command echo;
     processATcommandOK("", 2); // flush previous response
 
-  } else {
-    puts("ESP8266 not available, check connections, retart in 10 secs");
-    sleep_ms(10000);
-    watchdog_reboot(0, 0, 0); 
-    sleep_ms(10000);
-  }
+  } else doRestart("ESP8266 not available, check connections");
 }
 
-static void uartRXirq() {
+// ISRs in RAM fro speed
+static void __not_in_flash_func (uartRXirq)() {
   // UART RX interrupt handler
   if (mutex_try_enter(&ESP8266mutex, NULL)) {
     // not being used for GPIOs, so can take it
@@ -105,16 +117,16 @@ static void uartRXirq() {
   }  // in use so ignore
 }
 
-static void core0_sio_irq() {
+static void __not_in_flash_func (core0_sio_irq)() {
   // pointer to incoming input from core1 on interrupt
   while (multicore_fifo_rvalid()) webIn = (uintptr_t(*)) multicore_fifo_pop_blocking();
   multicore_fifo_clear_irq();
 }
 
-static void core1_sio_irq() {
+static void __not_in_flash_func (core1_sio_irq)() {
   // pointer to outgoing response from core0 on interrupt
   while (multicore_fifo_rvalid()) webOut = (uintptr_t(*)) multicore_fifo_pop_blocking();
-  mutex_exit(&core0resp); // open gate for swervcer response
+  mutex_exit(&core0resp); // open gate for server response
   multicore_fifo_clear_irq();
 }
 
@@ -140,9 +152,10 @@ bool startWebServer() {
     int retries = NTPRETRIES;
     do {
       sleep_ms(1000);
-      // wait for 'unexpected' response
-      if (!processATcommand("CIPSNTPTIME?", 2, "1970")) { 
-        // have a valid time if not default 1970
+      // wait for response not containing 1970
+      processATcommand("CIPSNTPTIME?", 2, "");
+      if (strstr(responseBuffer, "1970") == NULL) {
+        // assume have current time if not default 1970
         setTOD();
         break;
       }
@@ -163,7 +176,7 @@ bool startWebServer() {
     irq_set_enabled(SIO_IRQ_PROC0, true);
     uart_set_irq_enables(uart0, true, false);
     isInit = true;
-  } else puts("*** Failed to setup wifi connection");
+  } else doRestart("*** Failed to setup wifi connection");
 
   mutex_exit(&ESP8266mutex);
   return isInit;
@@ -213,29 +226,32 @@ void serveClients() {
   while (true) {
     // handle incoming web client requests, gate on interrupt
     mutex_enter_blocking(&uartIrq);
-    if (uart_is_readable(uart0)) {
-      processATcommand("", 2, "");
-      // request available
-      if (strstr(responseBuffer, "+IPD") != NULL) {
+      if (uart_is_readable(uart0)) {
+        processATcommand("", 2, "");
+        // request available
+        if (strstr(responseBuffer, "+IPD") != NULL) {
 
-        // +IPD,<link	ID>,<len>:<method> <path> HTTP/1.1
-        // received client request, get client id
-        int valOffset = 0;
-        int valLen = getParam(valOffset, "+IPD,", ","); 
-        char id[valLen+1] = {0};
-        strncpy(id, responseBuffer+valOffset, valLen);
+          // +IPD,<link	ID>,<len>:<method> <path> HTTP/1.1
+          // received client request, get client id
+          int valOffset = 0;
+          int valLen = getParam(valOffset, "+IPD,", ","); 
+          char id[valLen+1] = {0};
+          strncpy(id, responseBuffer+valOffset, valLen);
 
-        // get length of data to return
-        valOffset += valLen;
-        valLen = getParam(valOffset, ",", ":"); 
-        char reqLen[valLen+1] = {0};
-        strncpy(reqLen, responseBuffer+valOffset, valLen);
-        int requestLen = atoi(reqLen);
+          // get length of data to return
+          valOffset += valLen;
+          valLen = getParam(valOffset, ",", ":"); 
+          char reqLen[valLen+1] = {0};
+          strncpy(reqLen, responseBuffer+valOffset, valLen);
+          int requestLen = atoi(reqLen);
 
-        // received payload, so process response   
-        if (strlen(responseBuffer) > requestLen) sendResponse(id);       
-        else printf("*** truncated input, expected %u, got %u: %s\n", requestLen, strlen(responseBuffer), responseBuffer);
-      }  // unexpected content, ignore
+          // received payload, so process response   
+          if (strlen(responseBuffer) > requestLen) sendResponse(id);       
+          else {
+            printf("expected %u, got %u: %s\n", requestLen, strlen(responseBuffer), responseBuffer);
+            doRestart(" ");
+          }
+        }  // unexpected content, ignore
     }
     mutex_exit(&ESP8266mutex); // allow gpios
     irq_set_enabled(UART0_IRQ, true); // reenable interrupts
@@ -268,53 +284,51 @@ static void sendResponse(const char* id) {
   printf("Web client input: %s %s\n", method, core0msg);
 
   // raise interrupt to send incoming request/data to main app on core 0
-  multicore_fifo_push_blocking((uintptr_t)core0msg);
-  // block on response from main app via interrupt
-  mutex_enter_blocking(&core0resp); 
-  // have response
-  char* webOutStr = (char*)webOut; 
-  int webOutLeft = strlen(webOutStr);
-  int webOutStrPtr = 0;
-  webOut = 0;
+  if (multicore_fifo_wready()) {
+    multicore_fifo_push_blocking((uintptr_t)core0msg);
+    // block on response from main app via interrupt
+    if (mutex_enter_timeout_ms(&core0resp, 1000*20)) {
+      // have response
+      char* webOutStr = (char*)webOut; 
+      int webOutLeft = strlen(webOutStr);
+      int webOutStrPtr = 0;
+      webOut = 0;
 
-  // send response to client inside HTTP wrapper
-  snprintf(sendBuffer, SENDBUFFERLEN, "CIPSEND=%s,%d", id, strlen(httpHeader));
-  processATcommand(sendBuffer, 2, ">"); // ESP8266 ready to receive response
-  uart_puts(uart0, httpHeader); 
-  processATcommandOK("", 5); // confirm sent OK
+      // send response to client inside HTTP wrapper
+      if (!sendResponsePart(id, httpHeader)) return;
+      // select which content type to be sent
+      bool respRes = (webOutLeft > 0 && webOutStr[0] == '{') ? sendResponsePart(id, jsonHeader) : sendResponsePart(id, contentHeader);
+      if (!respRes) return;
 
-  // select which content type to be sent
-  if (webOutLeft > 0 && webOutStr[0] == '{') {
-    snprintf(sendBuffer, SENDBUFFERLEN, "CIPSEND=%s,%d", id, strlen(jsonHeader));
-    processATcommand(sendBuffer, 2, ">"); // ESP8266 ready to receive response
-    uart_puts(uart0, jsonHeader); 
-  } else {
-    snprintf(sendBuffer, SENDBUFFERLEN, "CIPSEND=%s,%d", id, strlen(contentHeader));
-    processATcommand(sendBuffer, 2, ">"); // ESP8266 ready to receive response
-    uart_puts(uart0, contentHeader); 
-  }
-  processATcommandOK("", 5); // confirm sent OK
-  
-  // send response in chunks if too large
-  while (webOutLeft > 0) {
-    size_t packetLen =  ((webOutLeft < SENDBUFFERLEN) ? webOutLeft : SENDBUFFERLEN-1);
-    webOutLeft -= packetLen;
-    snprintf(sendBuffer, SENDBUFFERLEN, "CIPSEND=%s,%d", id, packetLen); 
-    processATcommand(sendBuffer, 2, ">"); // ESP8266 ready to receive response
-    memcpy(sendBuffer, webOutStr+webOutStrPtr, packetLen);
-    webOutStrPtr += packetLen;
-    sendBuffer[packetLen] = 0; // terminate string
-    uart_puts(uart0, sendBuffer);
-    processATcommandOK("", 5); // confirm sent OK
-  } 
+      // send response in chunks if too large
+      while (webOutLeft > 0) {
+        size_t packetLen =  ((webOutLeft < SENDBUFFERLEN) ? webOutLeft : SENDBUFFERLEN-1);
+        webOutLeft -= packetLen;
+        snprintf(sendBuffer, SENDBUFFERLEN, "CIPSEND=%s,%d", id, packetLen); 
+        if (processATcommand(sendBuffer, 2, ">")) { // ESP8266 ready to receive response
+          memcpy(sendBuffer, webOutStr+webOutStrPtr, packetLen);
+          webOutStrPtr += packetLen;
+          sendBuffer[packetLen] = 0; // terminate string
+          uart_puts(uart0, sendBuffer);
+          if (!processATcommandOK("", 5)) return; // confirm sent OK
+        } else return;
+      } 
 
-  snprintf(sendBuffer, SENDBUFFERLEN, "CIPSEND=%s,%d", id, strlen(httpFooter));
-  processATcommand(sendBuffer, 2, ">"); // ESP8266 ready to receive response
-  uart_puts(uart0, httpFooter); 
-  processATcommandOK("", 5); // confirm sent OK
+      // closing footer
+      if (!sendResponsePart(id, httpFooter)) return;
 
+    } else doRestart("core0resp blocked");
+  } else doRestart("core0msg blocked");
   snprintf(sendBuffer, SENDBUFFERLEN, "CIPCLOSE=%s", id);
   processATcommandOK(sendBuffer, 2); // close request
+}
+
+bool sendResponsePart(const char* id, const char* responseData) {
+  snprintf(sendBuffer, SENDBUFFERLEN, "CIPSEND=%s,%d", id, strlen(responseData));
+  // check if ESP8266 ready to receive response
+  if (processATcommand(sendBuffer, 2, ">")) uart_puts(uart0, responseData); 
+  else return false;
+  return processATcommandOK("", 5); // confirm if sent OK
 }
 
 void appResponse(const char* appResp) {
@@ -326,6 +340,15 @@ void appResponse(const char* appResp) {
 uintptr_t* webInput() {
   // called from app to check web input state
   return webIn;
+}
+
+void doRestart(const char* fatalMsg) {
+  // something went wrong, so restart
+  printf("*** fatal, restart in 10 secs: ");
+  puts(fatalMsg);
+  sleep_ms(10000);
+  watchdog_reboot(0, 0, 0); 
+  sleep_ms(10000);
 }
 
 /* ----------------------------- Process AT commands -------------------------------- */
@@ -364,22 +387,29 @@ static bool processATcommand(const char* command, int64_t allowTime, const char*
       // printf("Success: [%s]\n", responseBuffer);
       return true;
     }
-    // expected response not found, check if busy
+    // expected response not found, check if busy processing
     if (strstr(responseBuffer, "busy p...") != NULL) {
       printf("ESP8266 busy, retry command %s\n", command);
       sleep_ms(1000); // ESP8266 not ready for command, so retry by relooping
       runCommand = true;
     }
+    // ignore error due to web page being closed
+    if (strstr(responseBuffer, "link is not valid") != NULL) return false;
   }
 
   // timed out, required response not found
   if (strlen(successMsg) > 0) {
     if (buffPtr > 0) {
-      if (strstr(responseBuffer, "busy p...") != NULL) printf("*** Timed out waiting on ESP8266 busy %s\n", command);
-      else printf("*** Command %s got unexpected response: [%s]\n", command, responseBuffer);
-    } else printf("*** Timed out waiting for response to %s\n", command);
-    return false;
+      if (strstr(responseBuffer, "link is not valid") == NULL) {// ignore error due to web page being closed
+        if (strstr(responseBuffer, "busy p...") != NULL) doRestart("Timed out waiting on ESP8266 busy");
+        if (strlen(responseBuffer) == 0) doRestart("No ESP8266 response");
+        if (strstr(responseBuffer, "busy s...") != NULL) doRestart("ESP8266 unable to receive");
+        if (strstr(responseBuffer, "ERROR") != NULL) doRestart("ESP8266 out of sync with Pico");
+        printf("*** Command %s got unexpected response: [%s]\n", command, responseBuffer);
+      }
+    } else doRestart("Timed out waiting for ESP8266 response");
   } else return (buffPtr > 0) ? true : false; // where successMsg is ignored
+  return false;
 }
 
 static int getATdata(int buffPtr) {
@@ -396,9 +426,11 @@ static int getATdata(int buffPtr) {
 
 static int getParam(int &valOffset, const char* startStr, const char* endStr) {
   // obtain location of parameter from ESP8266 AT response bounded by start and end strings
-  char* s = strstr(responseBuffer+valOffset, startStr);   
+  char* s = strstr(responseBuffer+valOffset, startStr);  
+  if (s == NULL) return 0;
   s += strlen(startStr); 
   char* e = strstr(s, endStr);  
+  if (e == NULL) return 0;
   valOffset = s-responseBuffer;   
   // return length of param, and update supplied arg with offset to param
   return e-s; 
@@ -435,15 +467,17 @@ int ESP8266digitalRead(int pin) {
   // read from ESP8266 IO pin
   if (mutex_enter_timeout_ms(&ESP8266mutex, MUTEXWAIT)) {
     snprintf(sendBuffer, SENDBUFFERLEN, "SYSGPIOREAD=%u", pin);
-    processATcommandOK(sendBuffer, 1); // +SYSGPIOREAD:14,0,1
-    int valOffset = 0;
-    int valLen = getParam(valOffset, ",", ","); // skip over direction param
-    valOffset += valLen;
-    valLen = getParam(valOffset, ",", "\r");  // final param is read value
-    char pinVal[valLen+1] = {0};
-    strncpy(pinVal, responseBuffer+valOffset, valLen);
+    if (processATcommandOK(sendBuffer, 1)) {; // +SYSGPIOREAD:14,0,1
+      int valOffset = 0;
+      int valLen = getParam(valOffset, ",", ","); // skip over direction param
+      valOffset += valLen;
+      valLen = getParam(valOffset, ",", "\r");  // final param is read value
+      char pinVal[valLen+1] = {0};
+      strncpy(pinVal, responseBuffer+valOffset, valLen);
+      mutex_exit(&ESP8266mutex);
+      return atoi(pinVal); 
+    }
     mutex_exit(&ESP8266mutex);
-    return atoi(pinVal); 
   }
   return -1; // failed to read
 }
@@ -462,13 +496,15 @@ bool ESP8266digitalWrite(int pin, bool value) {
 float ESP8266analogRead() {
   // read value from single analog pin and return as voltage
   if (mutex_enter_timeout_ms(&ESP8266mutex, MUTEXWAIT)) {
-    processATcommandOK("SYSADC?", 1);
-    int valOffset = 0;
-    int valLen = getParam(valOffset, ":", "\r");
-    char adcVal[valLen+1] = {0};
-    strncpy(adcVal, responseBuffer+valOffset, valLen); // extract value from response
+    if (processATcommandOK("SYSADC?", 1)) {
+      int valOffset = 0;
+      int valLen = getParam(valOffset, ":", "\r");
+      char adcVal[valLen+1] = {0};
+      strncpy(adcVal, responseBuffer+valOffset, valLen); // extract value from response
+      mutex_exit(&ESP8266mutex);
+      return (float)(atoi(adcVal)/1024.0); // as a voltage 0 - 1V
+    }
     mutex_exit(&ESP8266mutex);
-    return (float)(atoi(adcVal)/1024.0); // as a voltage 0 - 1V
   } 
   return -1.0; // failed to read
 }
