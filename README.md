@@ -12,7 +12,7 @@ The program consists of:
 
 ## ESP8266
 The ESP8266 provides wifi connectivity for the Raspberry Pico. The ESP8266 needs to be loaded with Espressif AT firmware after which no programming of the ESP8266 is required. The AT firmware resources can be downloaded from Espressif:
-* [AT firmware](https://docs.espressif.com/projects/esp-at/en/latest/AT_Binary_Lists/ESP8266_AT_binaries.html). Note `ESP8266 NonOS AT Bin` is no longer available and has been replaced by `ESP8266 IDF AT Bin` which I have not tested. A copy of the old firmware is stored in this repository: `ESP8266_NonOS_AT_Bin_V1.7.4.zip`
+* [AT firmware](https://docs.espressif.com/projects/esp-at/en/latest/AT_Binary_Lists/ESP8266_AT_binaries.html). Note `ESP8266 NonOS AT Bin` is no longer available and has been replaced by `ESP8266 IDF AT Bin` which I have not tested and is not suitable for 1MB flash. A copy of the old firmware `ESP8266_NonOS_AT_Bin_V1.7.4.zip` has therefore been stored in this repository.
 * [Flashing tool](https://www.espressif.com/sites/default/files/tools/flash_download_tool_v3.8.5.zip).
 * [Instructions](https://www.espressif.com/sites/default/files/documentation/4a-esp8266_at_instruction_set_en.pdf).
 
