@@ -7,5 +7,4 @@ set(MYPROJECTS_PATH ${PROJECT_SOURCE_DIR})
 pico_sdk_init()
 
 add_subdirectory(PicoWebServer)
-#add_subdirectory(double_tap_usb_boot)
 
